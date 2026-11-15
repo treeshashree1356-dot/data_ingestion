@@ -6,7 +6,9 @@ from config.settings import settings
 from enrichment.category_rules import CATEGORY_RULES
 from enrichment.metadata_enricher import ALLOWED_ACCESS_LEVELS
 from indexing.vector_store import IndexingError
+from query.query_schemas import QueryContext, QueryProcessingError, QueryValidationError
 from services.indexing_service import indexing_service
+from services.query_service import query_service
 
 
 def render_indexing_view() -> None:
@@ -70,13 +72,13 @@ def render_indexing_view() -> None:
 
     # Test Retrieval Section
     st.markdown("---")
-    st.markdown("### 🔎 Test Retrieval")
-    st.caption("Verify retrieval sanity with semantic similarity search and metadata filtering.")
+    st.markdown("### 🔎 Test Retrieval & Query Processing")
+    st.caption("Verify retrieval sanity with user query processing, intent detection, category inference, and RBAC filtering.")
 
     q_col1, q_col2 = st.columns([3, 1])
     with q_col1:
         test_query = st.text_input(
-            "Test Query",
+            "User Query",
             placeholder="e.g. What are the policy guidelines for code of conduct?",
             key="input_test_query",
         )
@@ -89,23 +91,49 @@ def render_indexing_view() -> None:
             key="input_top_k",
         )
 
-    f_col1, f_col2 = st.columns(2)
+    f_col1, f_col2, f_col3 = st.columns(3)
     with f_col1:
-        filter_cat = st.selectbox(
-            "Filter Category (Optional)",
-            options=["All"] + list(CATEGORY_RULES.keys()),
+        user_role = st.selectbox(
+            "User Role (RBAC)",
+            options=["all", "admin", "engineering", "internal", "guest"],
             index=0,
-            key="select_filter_category",
+            help="Simulates the user's authorization role to test RBAC query filtering.",
+            key="select_user_role",
         )
     with f_col2:
-        filter_level = st.selectbox(
-            "Filter Access Level (Optional)",
-            options=["All"] + list(ALLOWED_ACCESS_LEVELS),
+        filter_cat = st.selectbox(
+            "Category Filter",
+            options=["All (Auto-detect)"] + list(CATEGORY_RULES.keys()),
             index=0,
+            help="Override or allow automatic keyword detection for category classification.",
+            key="select_filter_category",
+        )
+    with f_col3:
+        filter_level = st.selectbox(
+            "Access Level Filter",
+            options=["All (Derive from role)"] + list(ALLOWED_ACCESS_LEVELS),
+            index=0,
+            help="Override or allow automatic derivation of access levels from user role.",
             key="select_filter_access_level",
         )
 
-    search_clicked = st.button("Search", type="secondary", key="btn_test_search")
+    opt_col1, opt_col2 = st.columns(2)
+    with opt_col1:
+        auto_detect_cat = st.checkbox(
+            "Auto-detect category from query keywords",
+            value=True,
+            help="Uses existing CATEGORY_RULES keyword patterns to infer the category.",
+            key="chk_auto_detect_category",
+        )
+    with opt_col2:
+        enable_expansion = st.checkbox(
+            "Enable query expansion (acronyms & synonyms)",
+            value=False,
+            help="Expands technical abbreviations (e.g. 'auth', 'k8s', 'rpc') to improve recall.",
+            key="chk_enable_expansion",
+        )
+
+    search_clicked = st.button("🔎 Process Query & Search", type="secondary", key="btn_test_search")
 
     if search_clicked:
         if not test_query or not test_query.strip():
@@ -113,23 +141,51 @@ def render_indexing_view() -> None:
         elif stats["count"] == 0:
             st.warning("Vector database collection is currently empty. Please index documents first.")
         else:
-            filters = {}
-            if filter_cat != "All":
-                filters["category"] = filter_cat
-            if filter_level != "All":
-                filters["access_level"] = filter_level
+            cat_override = None if filter_cat.startswith("All") else filter_cat
+            level_override = None if filter_level.startswith("All") else filter_level
 
-            with st.spinner("Querying vector database..."):
+            query_ctx = QueryContext(
+                user_role=user_role,
+                target_category=cat_override,
+                access_level=level_override,
+                top_k=top_k,
+                auto_detect_category=auto_detect_cat,
+                enable_expansion=enable_expansion,
+            )
+
+            with st.spinner("Processing query and querying vector database..."):
                 try:
-                    search_results = indexing_service.search(
-                        query=test_query.strip(),
-                        k=top_k,
-                        filters=filters or None,
+                    response = query_service.execute_query(
+                        query=test_query,
+                        context=query_ctx,
                     )
-                    st.session_state["search_results"] = search_results
+                    st.session_state["query_response"] = response
+                    st.session_state["search_results"] = response.results
+                except (QueryValidationError, QueryProcessingError) as exc:
+                    st.error(f"Query Error: {exc}")
                 except Exception as exc:
                     st.error(f"Search failed: {exc}")
 
+    # Display Query Diagnostics
+    query_response = st.session_state.get("query_response")
+    if query_response and hasattr(query_response, "processed_query"):
+        pq = query_response.processed_query
+        with st.expander("🛠️ Query Diagnostics & Pipeline Breakdown", expanded=True):
+            d1, d2, d3, d4 = st.columns(4)
+            d1.metric("Intent", pq.intent.intent_type.value)
+            d2.metric("Intent Confidence", f"{pq.intent.confidence:.0%}")
+            d3.metric("Detected Category", pq.detected_category or "None")
+            d4.metric("Latency", f"{query_response.duration_seconds * 1000:.1f} ms")
+
+            st.write(f"- **Cleaned Query:** `{pq.cleaned_query}`")
+            st.write(f"- **Intent Description:** {pq.intent.description}")
+            if pq.expanded_terms:
+                st.write(f"- **Expanded Terms:** `{', '.join(pq.expanded_terms)}`")
+
+            st.markdown("**Applied ChromaDB Filter Payload:**")
+            st.json(pq.filters if pq.filters else {"status": "No filters applied (unrestricted)"})
+
+    # Display Search Results
     search_results = st.session_state.get("search_results", [])
     if search_results:
         st.markdown(f"**Found {len(search_results)} result(s):**")
@@ -161,5 +217,6 @@ def render_indexing_view() -> None:
             indexing_service.vector_store.reset_collection()
             st.session_state["indexing_result"] = None
             st.session_state["search_results"] = []
+            st.session_state["query_response"] = None
             st.success("Vector collection has been completely reset.")
             st.rerun()

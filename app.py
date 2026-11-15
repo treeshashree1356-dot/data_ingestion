@@ -52,6 +52,9 @@ def init_session_state() -> None:
     if "search_results" not in st.session_state:
         st.session_state["search_results"] = []
 
+    if "query_response" not in st.session_state:
+        st.session_state["query_response"] = None
+
 
 def main() -> None:
     """Main application layout and dashboard orchestration."""
@@ -116,6 +119,7 @@ def main() -> None:
             st.session_state["indexing_result"] = None
             st.session_state["enrichment_options"] = {}
             st.session_state["search_results"] = []
+            st.session_state["query_response"] = None
             st.rerun()
 
     # Main Dashboard Tabs

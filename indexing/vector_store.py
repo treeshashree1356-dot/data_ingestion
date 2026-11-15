@@ -303,6 +303,65 @@ class VectorStoreManager:
         except Exception as exc:
             raise IndexingError(f"Similarity search failed: {exc}") from exc
 
+    def similarity_search_by_vector(
+        self,
+        embedding: list[float],
+        k: int | None = None,
+        filters: dict[str, Any] | None = None,
+    ) -> list[tuple[Document, float]]:
+        """Perform semantic similarity search using a precomputed embedding vector.
+
+        Args:
+            embedding: Query embedding vector (list of floats).
+            k: Top-k maximum results to return.
+            filters: Optional metadata filters combined via $and.
+
+        Returns:
+            List of (Document, score) tuples sorted by relevance score.
+
+        Raises:
+            ValueError: If embedding vector is empty or invalid.
+            IndexingError: If query execution against the vector store fails.
+        """
+        if not embedding or not isinstance(embedding, (list, tuple)):
+            raise ValueError("Embedding vector must be a non-empty list of floats.")
+
+        if self.count() == 0:
+            return []
+
+        top_k = k if k is not None else int(getattr(settings, "RETRIEVAL_TOP_K", 4))
+        chroma_filter = _build_chroma_filter(filters)
+        collection = self._get_collection()
+
+        n_results = min(top_k, max(1, collection.count()))
+        query_kwargs: dict[str, Any] = {
+            "query_embeddings": [list(embedding)],
+            "n_results": n_results,
+            "include": ["documents", "metadatas", "distances"],
+        }
+        if chroma_filter:
+            query_kwargs["where"] = chroma_filter
+
+        try:
+            res = collection.query(**query_kwargs)
+            results: list[tuple[Document, float]] = []
+            if res and res.get("documents") and res["documents"] and len(res["documents"][0]) > 0:
+                docs = res["documents"][0]
+                metas = res["metadatas"][0] if res.get("metadatas") else [{}] * len(docs)
+                dists = res["distances"][0] if res.get("distances") else [0.0] * len(docs)
+
+                for doc_text, meta, dist in zip(docs, metas, dists):
+                    # For cosine distance, similarity is max(0.0, 1.0 - distance)
+                    score = max(0.0, 1.0 - float(dist)) if dist is not None else 1.0
+                    doc = Document(page_content=doc_text, metadata=dict(meta) if meta else {})
+                    results.append((doc, score))
+
+            # Ensure sorted descending by similarity score
+            results.sort(key=lambda item: item[1], reverse=True)
+            return results
+        except Exception as exc:
+            raise IndexingError(f"Vector similarity search failed: {exc}") from exc
+
     def count(self) -> int:
         """Return the current number of vectors stored in the collection."""
         return self._get_collection().count()
@@ -329,9 +388,8 @@ class VectorStoreManager:
 
         Args:
             source: Source string to purge.
-
-        Returns:
-            Number of vectors deleted.
+            Returns:
+                Number of vectors deleted.
         """
         collection = self._get_collection()
         matching = collection.get(where={"source": source})

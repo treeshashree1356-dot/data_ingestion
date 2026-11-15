@@ -13,7 +13,7 @@ def reset_downstream(from_stage: str) -> None:
 
     Stage progression:
     - 'extraction' or 'chunking': invalidates enriched_chunks, embedding_result,
-      indexing_result, search_results.
+      indexing_result, search_results, query_response.
     - 'enrichment': invalidates embedding_result, indexing_result.
     - 'embedding': invalidates indexing_result.
 
@@ -28,6 +28,7 @@ def reset_downstream(from_stage: str) -> None:
         st.session_state["embedding_result"] = None
         st.session_state["indexing_result"] = None
         st.session_state["search_results"] = []
+        st.session_state["query_response"] = None
     elif stage == "enrichment":
         st.session_state["embedding_result"] = None
         st.session_state["indexing_result"] = None

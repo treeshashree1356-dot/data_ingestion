@@ -185,6 +185,9 @@ class IndexingService:
     ) -> list[tuple[Document, float]]:
         """Perform similarity search on the indexed vector store.
 
+        Delegates retrieval through QueryService bound to this service's vector_store
+        to ensure query normalization, intent detection, and filter validation.
+
         Args:
             query: Natural language query string.
             k: Top-k maximum results to return.
@@ -193,8 +196,11 @@ class IndexingService:
         Returns:
             List of (Document, score) tuples matching query.
         """
+        from services.query_service import QueryService
+
         logger.info("Executing similarity search for query: '%s' (k=%s, filters=%s)", query, k, filters)
-        results = self.vector_store.similarity_search(query=query, k=k, filters=filters)
+        qs = QueryService(vector_store=self.vector_store)
+        results = qs.search(query=query, k=k, filters=filters)
         logger.info("Search returned %d results.", len(results))
         return results
 
