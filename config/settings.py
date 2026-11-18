@@ -55,6 +55,7 @@ class Settings:
     DEFAULT_ACCESS_LEVEL: str = os.getenv("DEFAULT_ACCESS_LEVEL", "internal")
     DEFAULT_ALLOWED_ROLES: str = os.getenv("DEFAULT_ALLOWED_ROLES", "all")
     RETRIEVAL_TOP_K: int = int(os.getenv("RETRIEVAL_TOP_K", "4"))
+    DEFAULT_MAX_CONTEXT_CHARS: int = int(os.getenv("DEFAULT_MAX_CONTEXT_CHARS", "6000"))
 
     # OCR / External Tools
     TESSERACT_CMD: str | None = os.getenv("TESSERACT_CMD") or None

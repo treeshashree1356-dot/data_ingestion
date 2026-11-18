@@ -10,9 +10,9 @@ from typing import Any
 
 from query.query_schemas import ProcessedQuery
 from retrieval.base import BaseReranker
-from retrieval.rerankers import ScoreBasedReranker
-from retrieval.result_filter import ResultFilter
-from retrieval.retrieval_schemas import SearchResult
+
+from config.settings import settings
+
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,7 @@ class RankingOptions:
     allowed_access_levels: list[str] | None = None
     allowed_sources: list[str] | None = None
     excluded_sources: list[str] | None = None
+    max_context_chars: int = 6000
 
     def __post_init__(self) -> None:
         """Validate options."""
@@ -65,6 +66,10 @@ class RankedContext:
         sources_cited: Unique source names included in the context text.
         char_count: Total character count of the assembled context text.
         word_count: Total word count of the assembled context text.
+        total_chars_used: Total characters used after applying context budget.
+        remaining_budget: Remaining characters from the budget after selection.
+        skipped_chunks_count: Number of chunks skipped due to budget limits.
+        max_context_chars: Configured maximum context characters.
     """
 
     results: list[SearchResult]
@@ -74,6 +79,21 @@ class RankedContext:
     sources_cited: list[str] = field(default_factory=list)
     char_count: int = 0
     word_count: int = 0
+    total_chars_used: int = 0
+    remaining_budget: int = 0
+    skipped_chunks_count: int = 0
+    max_context_chars: int = 0
+
+    def __post_init__(self) -> None:
+        """Compute statistics if not explicitly provided."""
+        if self.context_text:
+            if not self.char_count:
+                self.char_count = len(self.context_text)
+            if not self.word_count:
+                self.word_count = len(self.context_text.split())
+        if self.results and not self.sources_cited:
+            sources: set[str] = {r.source_name for r in self.results if r.source_name}
+            self.sources_cited = sorted(sources)
 
     def __post_init__(self) -> None:
         """Compute statistics if not explicitly provided."""
@@ -188,24 +208,39 @@ class ResultRankingPipeline(BaseReranker):
                 overlap_threshold=opts.overlap_threshold,
             )
 
-        # 5. Top-K Truncation
+                # 5. Top-K Truncation
         final_results = ranked[: opts.top_k]
 
-        # 6. Assemble context for downstream LLM consumption
-        context_text = format_context_for_llm(final_results)
+        # 6. Apply context budgeting (character limit)
+        budget_manager = ContextBudgetManager(default_max_chars=settings.DEFAULT_MAX_CONTEXT_CHARS)
+        budget_res: ContextBudgetResult = budget_manager.apply_budget(
+            chunks=final_results,
+            max_context_chars=opts.max_context_chars,
+        )
+        selected_chunks = budget_res.selected_chunks
+
+        # 7. Assemble context for downstream LLM consumption using budgeted chunks
+        context_text = format_context_for_llm(selected_chunks)
 
         logger.info(
-            "Ranking pipeline finished: %d candidates -> %d final chunks (top_k=%d)",
+            "Ranking pipeline finished: %d candidates -> %d final chunks (top_k=%d) -> %d after budgeting (chars used=%d, remaining=%d)",
             total_candidates,
             len(final_results),
             opts.top_k,
+            len(selected_chunks),
+            budget_res.total_chars_used,
+            budget_res.remaining_budget,
         )
 
         return RankedContext(
-            results=final_results,
+            results=selected_chunks,
             context_text=context_text,
             total_candidates=total_candidates,
-            retained_count=len(final_results),
+            retained_count=len(selected_chunks),
+            total_chars_used=budget_res.total_chars_used,
+            remaining_budget=budget_res.remaining_budget,
+            skipped_chunks_count=budget_res.skipped_chunks_count,
+            max_context_chars=budget_res.max_context_chars,
         )
 
     def rerank(
